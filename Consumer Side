@@ -1,22 +1,20 @@
-/* Bring the shared database into your account by creating a database from the share. */
+--cleanup before demo
 use role accountadmin;
+drop database Dept1_HR_Data;
 
+/* Bring the shared database into your account by creating a database from the share. */
 show shares;
 
 desc share FBA61831.HR_DATA_SHARE;
 
 create database Dept1_HR_Data from share FBA61831.HR_DATA_SHARE;
 
-
 /* Grant privileges on the database to other roles (e.g. SYSADMIN) in your account. */
 grant imported privileges on database Dept1_HR_Data to sysadmin;
-
 
 /* Now you can use the SYSADMIN role to query the view in the database you created.       */
 use role sysadmin;
 use warehouse adhoc;
-
-show views;
 
 select * from DEPT1_HR_DATA.SHARED_HR_DATA.EMPLOYEE_DATA_V;
 select department, count(*) from DEPT1_HR_DATA.SHARED_HR_DATA.EMPLOYEE_DATA_V group by 1;
