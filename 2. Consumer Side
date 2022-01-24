@@ -1,25 +1,22 @@
---cleanup before demo
+--set context
 use role accountadmin;
-drop database Dept1_HR_Data;
+use warehouse adhoc;
 
 --View data shared with me
 show shares;
 desc share FBA61831.HR_DATA_SHARE;
 
+//These steps have been performed in UI so not necessary to repeat, including for completeness
 --Create a database from the share
-create database Dept1_HR_Data from share FBA61831.HR_DATA_SHARE;
+--create database HR_DATA_SHARE from share FBA61831.HR_DATA_SHARE;
 
 --Grant privileges on the database to other roles (e.g. SYSADMIN) in your account.
-grant imported privileges on database Dept1_HR_Data to sysadmin;
-
---Now you can use the SYSADMIN role to query the view in the database you created.
-use role sysadmin;
-use warehouse adhoc;
+--grant imported privileges on database HR_DATA_SHARE to sysadmin;
+//
 
 --Query data with row-level security
-select * from DEPT1_HR_DATA.SHARED_HR_DATA.EMPLOYEE_DATA_V;
-select department, count(*) from DEPT1_HR_DATA.SHARED_HR_DATA.EMPLOYEE_DATA_V group by 1;
+select * from HR_DATA_SHARE.SHARED_HR_DATA.EMPLOYEE_DATA_V;
+select department, count(*) from HR_DATA_SHARE.SHARED_HR_DATA.EMPLOYEE_DATA_V group by 1;
 
-
---Query data with column level security
-select * from DEPT1_HR_DATA.SHARED_HR_DATA.EMPLOYEE_DATA_V2;
+--reset
+drop database if exists HR_DATA_SHARE;
