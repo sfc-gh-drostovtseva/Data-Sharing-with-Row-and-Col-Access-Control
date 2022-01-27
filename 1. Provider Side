@@ -1,23 +1,20 @@
 
+/*****************************************************************************************************/
+/*                                         Create Demo Data                                          */
+/*****************************************************************************************************/
+
+--Set context
 use role accountadmin;
-
-/*****************************************************************************************************/
-/*                                         create demo data                                          */
-/*****************************************************************************************************/
-
-create database hr_data; --mock database imitate SABHRS
-create schema main_hr_data; --mock HR data in SABHRS
-create schema shared_hr_data; -- mock HR data that will be shared with departments
-create stage source_data;
-create warehouse hr_data_wh;
-
 use database hr_data;
 use schema main_hr_data;
 use warehouse hr_data_wh;
 
-
 -- Load some Employee data
--- in SnowSQL, execute "put file:///Users/drostovtseva/Downloads/Employee_data.csv @source_data;
+-- in SnowSQL, execute 
+    --snowsql -a fba61831 -u admin
+    --use database hr_data
+    --use schema main_hr_data
+    --put file:///Users/drostovtseva/Downloads/Employee_data.csv @source_data;
 ls @source_data;
 
 create or replace table employee_data
@@ -30,74 +27,114 @@ create or replace file format my_csv type = 'CSV' skip_header = 1;
 copy into employee_data from @source_data
 file_format=(format_name=my_csv);
 
--- Create a mapping table to demonstrate row access control
-create or replace table sharing_access (
+--Query demo data
+
+select * from employee_data;
+
+select department, count(*) num_employees, round(avg(salary)) avg_salary
+from employee_data
+group by 1
+order by 1;
+
+/***********************************************************************/
+/*       Implement masking policies for column-level control           */
+/***********************************************************************/
+
+--create PII User role and grant to John for testing
+create or replace role pii_user;
+grant role pii_user to user john;
+
+
+--give PII user grants to HR data;
+grant usage on warehouse hr_data_wh to role pii_user;
+grant usage on database hr_data to role pii_user;
+grant usage on schema hr_data.main_hr_data to role pii_user;
+grant select on all tables in database hr_data to role pii_user;
+
+-- Create masking policies to protect our PII data   
+use schema hr_data.main_hr_data;
+create or replace masking policy mask_string_simple as
+  (val string) returns string ->
+  case
+    when current_role() in ('PII_USER') then val
+      else '**masked**'
+    end;
+    
+create or replace masking policy mask_int_simple as
+  (val integer) returns integer ->
+  case
+    when current_role() in ('PII_USER') then val
+      else -999999
+    end;
+
+create or replace masking policy mask_zip3 as
+  (val string) returns string ->
+  case
+    when current_role() in ('PII_USER') then val
+      else substr(val,1,3)||'**'
+    end;
+
+--apply masking policies 
+alter table employee_data modify
+    column ssn set masking policy mask_string_simple,
+    column street_address set masking policy mask_string_simple,
+    column zip_code set masking policy mask_zip3,
+    column salary set masking policy mask_int_simple;
+
+--test masking policies 
+select * from employee_data; -- as admin, I see masked data
+
+use role pii_user;
+select * from employee_data;
+
+use role accountadmin;
+
+
+/*************************************************************************************/
+/*               Implement row access policy and share with departments              */
+/*************************************************************************************/
+
+-- Create a mapping table to enable row access control
+create or replace table entitlement_table (
   department string,
   snowflake_account string
 );
 
-insert into sharing_access 
+insert into entitlement_table 
 values
-('Dept1', current_account()),
+('Dept1', current_account()), --current account = FBA61831 and it is the owner of the data
 ('Dept2', current_account()),
 ('Dept3', current_account()),
-('Dept1', 'PWA89469'); -- the second account belongs to Dept1 and they can only see Dept1 data
+('Dept1', 'PWA89469'),-- the second account belongs to Dept1 and they can only see Dept1 data
+('Dept2', 'PKA22797');-- the third account belongs to Dept2 and they can only see Dept2 data 
 
-/********************************************************************************************/
-/*               Scenario 1: Secure view for sharing with row-level security                */
-/********************************************************************************************/
+select * from entitlement_table;
 
---data to be shared
-select * from employee_data;
-
-select department, count(*)
-from employee_data
-group by 1;
-
---mapping table to enable row-level security
-select * from sharing_access;
-
---Create a secure view in the 'shared_hr_data' schema. This view filters the employee data from the first
---table by account, using the mapping information in the second table.         
-
-create or replace secure view hr_data.shared_hr_data.employee_data_v as
-    select a.*
-    from hr_data.MAIN_HR_DATA.EMPLOYEE_DATA as a
-    join hr_data.MAIN_HR_DATA.SHARING_ACCESS as b on a.department = b.department
-    and b.snowflake_account = current_account();
-
-select * from hr_data.shared_hr_data.employee_data_v;
-
-grant select on hr_data.shared_hr_data.employee_data_v to public;
-
---create a masking policy for SSN  - there is no reason for anyone to see the SSN
-create or replace masking policy mask_ssn as
-(ssn varchar) returns varchar ->
-'***-**-'||substr(ssn, 8,11);
-
---apply the masking policy to mask all SSNs for all viewers
-alter view hr_data.shared_hr_data.employee_data_v modify ssn set masking policy mask_ssn;
-
---test the secure view by first querying the data as the provider account. */
-select * from hr_data.shared_hr_data.employee_data_v;
-select count(*) from hr_data.shared_hr_data.employee_data_v;
+--create row access policy
+create or replace row access policy dept_policy as (dept_value varchar) returns boolean ->
+ exists (
+ select 1 from entitlement_table
+ where snowflake_account = current_account()
+ and department = dept_value
+ )
+;
+alter table hr_data.main_hr_data.employee_data add row access policy dept_policy on (department);
 
 select department, count(*) 
-from hr_data.shared_hr_data.employee_data_v
-group by 1;
+from hr_data.main_hr_data.employee_data
+group by 1
+order by 1; -- as provider account, I can still see all rows
 
-select * from hr_data.shared_hr_data.employee_data_v where department='Dept2';
-
--- next, test the secure view by querying the data as a simulated consumer account.                  */
+-- test the secure view by querying the data as a simulated consumer account
 alter session set simulated_data_sharing_consumer=PWA89469;
 
-select count(*) from hr_data.shared_hr_data.employee_data_v; -- only 1/3 of the records are visible;
+select count(*) from hr_data.main_hr_data.employee_data; -- only 1/3 of the records are visible;
 
 select department, count(*) 
-from hr_data.shared_hr_data.employee_data_v
+from hr_data.main_hr_data.employee_data
 group by 1; --only Dept1 data is visible
 
-select * from hr_data.shared_hr_data.employee_data_v where department='Dept2'; --cannot see Dept2 data
+select * from hr_data.main_hr_data.employee_data where department='Dept2'; --cannot see Dept2 data
 
 alter session unset simulated_data_sharing_consumer;
 
@@ -105,65 +142,34 @@ alter session unset simulated_data_sharing_consumer;
 /*                                        Share data                                        */
 /********************************************************************************************/
 
---Create a share using the ACCOUNTADMIN role
-use role accountadmin;
+--Create share
 create or replace share hr_data_share comment = 'Secure data sharing of HR data';
 
 show shares;
 
 --Grant privileges on the database objects to include in the share.  
 grant usage on database hr_data to share hr_data_share;
-grant usage on schema hr_data.shared_hr_data to share hr_data_share;
-grant select on hr_data.shared_hr_data.employee_data_v to share hr_data_share;
+grant usage on schema hr_data.main_hr_data to share hr_data_share;
+grant select on hr_data.main_hr_data.employee_data to share hr_data_share;
 
 --Confirm the contents of the share.
 show grants to share hr_data_share;
 
 --Add accounts to the share.                                    */
-alter share hr_data_share set accounts = PWA89469;
+alter share hr_data_share set accounts = PWA89469,PKA22797;
 
-/********************************************************************************************/
-/*              Scenario 2: Secure view for sharing with column-level security              */
-/********************************************************************************************/
+//reset
+use role accountadmin;
+drop table if exists HR_DATA.MAIN_HR_DATA.EMPLOYEE_DATA;
+drop table if exists HR_DATA.MAIN_HR_DATA.entitlement_table;
 
---Suppose we want to share all records but redact certain fields. 
---Users can see all rows but only their data is not redacted
+--drop share
+drop SHARE if exists hr_data_share;
 
---create a new secure view
-create or replace secure view hr_data.shared_hr_data.employee_data_v2 
-as
-    select a.*
-    from hr_data.MAIN_HR_DATA.EMPLOYEE_DATA as a
-;
+drop masking policy hr_data.main_hr_data.MASK_INT_SIMPLE;
+drop masking policy hr_data.main_hr_data.MASK_STRING_SIMPLE;
+drop masking policy hr_data.main_hr_data.MASK_ZIP3;
 
-grant select on hr_data.shared_hr_data.employee_data_v2 to public;
 
---create a masking policy based on department
-create or replace masking policy mask_pii as
-  (val string,department string) returns string ->
-  case
-    when exists 
-        (select department
-         from hr_data.MAIN_HR_DATA.SHARING_ACCESS
-         where snowflake_account=current_account() and hr_data.MAIN_HR_DATA.SHARING_ACCESS.department=department) then val
-      else '*MASKED*'
-    end;
 
---apply the policy to view
-alter view hr_data.shared_hr_data.employee_data_v2 modify first_name set masking policy mask_pii using (first_name, department);
-alter view hr_data.shared_hr_data.employee_data_v2 modify last_name set masking policy mask_pii using (last_name, department);
-alter view hr_data.shared_hr_data.employee_data_v2 modify street_address set masking policy mask_pii using (street_address, department);
-alter view hr_data.shared_hr_data.employee_data_v2 modify ssn set masking policy mask_ssn;
 
---test - provider account
-select * from hr_data.shared_hr_data.employee_data_v2; --provider account can see unmasked data
-
---test - consumer account
-alter session set simulated_data_sharing_consumer=PWA89469;
-
-select * from hr_data.shared_hr_data.employee_data_v2;
-
-alter session unset simulated_data_sharing_consumer;
-
---grant access to the view to the share
-grant select on hr_data.shared_hr_data.employee_data_v2 to share hr_data_share;
